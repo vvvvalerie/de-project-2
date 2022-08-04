@@ -124,7 +124,7 @@ CREATE TABLE public.shipping_info(
 );
 ```
 
-2. Заполняем данными из полей `shipping.shippingid`, `shipping.vendorid`, `shipping.payment_amount`, `shipping.shipping_plan_datetime`
+2. Заполняем данными новую таблицу
 
 ```sql
 INSERT INTO public.shipping_info(shippingid, vendorid, payment_amount, shipping_plan_datetime)
@@ -133,51 +133,22 @@ SELECT
 	shippingid,
 	vendorid,
 	payment_amount,
-	shipping_plan_datetime 
+	shipping_plan_datetime, 
+	ship_tr.id, 
+	ship_cr.id,
+	agreementid
 FROM public.shipping s
-ORDER BY shippingid;
-```
-
-3. Заполняем столбец `shipping_info.transfer_type_id`
-
-```sql
-UPDATE public.shipping_info AS ship_i
-SET (transfer_type_id) = (
-SELECT 
-	DISTINCT ship_tr.id 
-FROM public.shipping_transfer ship_tr
-JOIN public.shipping s 
+LEFT JOIN public.shipping_transfer ship_tr 
 	ON (regexp_split_to_array(s.shipping_transfer_description, ':'))[1] = ship_tr.transfer_type 
-	AND (regexp_split_to_array(s.shipping_transfer_description, ':'))[2] = ship_tr.transfer_model 
-WHERE ship_i.shippingid = s.shippingid);
-```
-
-4. Заполняем столбец `shipping_info.shipping_country_id`
-
-```sql
-
-UPDATE public.shipping_info AS ship_i
-SET (shipping_country_id) = (
-SELECT 
-	DISTINCT ship_cr.id  
-FROM public.shipping_country_rates ship_cr
-JOIN public.shipping s 
+	AND (regexp_split_to_array(s.shipping_transfer_description, ':'))[2] = ship_tr.transfer_model
+LEFT JOIN public.shipping_country_rates ship_cr
 	ON s.shipping_country= ship_cr.country
-WHERE ship_i.shippingid = s.shippingid);
+LEFT JOIN public.shipping_agreement ship_ag
+	ON (regexp_split_to_array(vendor_agreement_description, ':'))[1]::bigint = ship_ag.agreementid 
+ORDER BY shippingid);
 ```
 
-5. Заполняем столбец `shipping_info.agreementid`
 
-```sql
-
-UPDATE public.shipping_info AS ship_i
-SET (agreementid) = (
-SELECT 
-	DISTINCT ship_ag.agreementid
-FROM public.shipping_agreement ship_ag
-JOIN public.shipping s 
-	ON (regexp_split_to_array(vendor_agreement_description, ':'))[1]::bigint = ship_ag.agreementid 
-WHERE ship_i.shippingid = s.shippingid);
 ```
 
 ## Создание таблицы с последним статусом о доставке
@@ -200,44 +171,55 @@ CREATE TABLE public.shipping_status(
 );
 ```
 
-2. Заполянем `state` и `status` последними данными по каждой доставке
+2. Заполянем данными новую таблицу
 
 ```sql
-WITH ship_states AS(
+-- получаем последний статус каждого shippingid
+WITH ship_last_states AS(
 SELECT 
-	shippingid, 
-	state,
-	state_datetime,
-	status,
-	ROW_NUMBER() over(PARTITION BY shippingid ORDER BY state_datetime desc) AS state_order_desc
+	s.shippingid, 
+	s.state,
+	s.state_datetime,
+	s.status,
+	ROW_NUMBER() over(PARTITION BY s.shippingid ORDER BY s.state_datetime desc) AS state_order_desc
 FROM public.shipping s
-ORDER BY shippingid)
-INSERT INTO public.shipping_status(shippingid, state, status)
+ORDER BY s.shippingid),
+
+-- получаем дату старта доставки
+ship_booked_state_datetime AS (
 SELECT 
-	shippingid, 
+	DISTINCT
+	s.shippingid,
+	s.state_datetime 
+FROM public.shipping s
+WHERE s.state = 'booked'),
+
+-- получаем дату окончания доставки
+ship_recieved_state_datetime AS (
+SELECT 
+	DISTINCT 
+	s.shippingid,
+	s.state_datetime 
+FROM public.shipping s
+WHERE s.state = 'recieved')
+
+-- заполняем таблицу
+INSERT INTO public.shipping_status
+SELECT 
+	sls.shippingid, 
 	state, 
-	status
-FROM ship_states
-WHERE state_order_desc = 1;
+	status,
+	sbsd.state_datetime,
+	srsd.state_datetime
+FROM ship_last_states sls
+LEFT JOIN ship_booked_state_datetime sbsd 
+	ON sbsd.shippingid = ss.shippingid
+LEFT JOIN ship_recieved_state_datetime srsd 
+	ON srsd.shippingid = ss.shippingid
+WHERE state_order_desc = 1
+ORDER BY sls.shippingid;
 ```
 
-3. Заполянем дату фактического начала доставки `shipping_start_fact_datetime`
-
-```sql
-UPDATE public.shipping_status AS ss
-SET shipping_start_fact_datetime = s.state_datetime
-FROM public.shipping s
-WHERE s.shippingid = ss.shippingid AND s.state = 'booked';
-```
-
-4. Заполянем дату фактического окончания доставки `shipping_end_fact_datetime` 
-
-```sql
-UPDATE public.shipping_status AS ss
-SET shipping_end_fact_datetime = s.state_datetime
-FROM public.shipping s
-WHERE s.shippingid = ss.shippingid AND s.state = 'recieved';
-```
 
 ## Создание представления на основе готовых событий
 
