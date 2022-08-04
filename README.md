@@ -148,9 +148,6 @@ LEFT JOIN public.shipping_agreement ship_ag
 ORDER BY shippingid);
 ```
 
-
-```
-
 ## Создание таблицы с последним статусом о доставке
 
 1. Создаем таблицу `public.shipping_status` с полями
