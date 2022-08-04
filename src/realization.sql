@@ -74,39 +74,20 @@ SELECT
 	shippingid,
 	vendorid,
 	payment_amount,
-	shipping_plan_datetime 
+	shipping_plan_datetime, 
+	ship_tr.id, 
+	ship_cr.id,
+	agreementid
 FROM public.shipping s
-ORDER BY shippingid;
-
-UPDATE public.shipping_info AS ship_i
-SET (transfer_type_id) = (
-SELECT 
-	DISTINCT ship_tr.id 
-FROM public.shipping_transfer ship_tr
-JOIN public.shipping s 
+LEFT JOIN public.shipping_transfer ship_tr 
 	ON (regexp_split_to_array(s.shipping_transfer_description, ':'))[1] = ship_tr.transfer_type 
-	AND (regexp_split_to_array(s.shipping_transfer_description, ':'))[2] = ship_tr.transfer_model 
-WHERE ship_i.shippingid = s.shippingid);
-
-
-UPDATE public.shipping_info AS ship_i
-SET (shipping_country_id) = (
-SELECT 
-	DISTINCT ship_cr.id  
-FROM public.shipping_country_rates ship_cr
-JOIN public.shipping s 
+	AND (regexp_split_to_array(s.shipping_transfer_description, ':'))[2] = ship_tr.transfer_model
+LEFT JOIN public.shipping_country_rates ship_cr
 	ON s.shipping_country= ship_cr.country
-WHERE ship_i.shippingid = s.shippingid);
-
-
-UPDATE public.shipping_info AS ship_i
-SET (agreementid) = (
-SELECT 
-	DISTINCT ship_ag.agreementid
-FROM public.shipping_agreement ship_ag
-JOIN public.shipping s 
+LEFT JOIN public.shipping_agreement ship_ag
 	ON (regexp_split_to_array(vendor_agreement_description, ':'))[1]::bigint = ship_ag.agreementid 
-WHERE ship_i.shippingid = s.shippingid);
+ORDER BY shippingid)
+
 
 DROP TABLE IF EXISTS public.shipping_status;
 CREATE TABLE public.shipping_status(
@@ -117,34 +98,47 @@ CREATE TABLE public.shipping_status(
 	shipping_end_fact_datetime timestamp
 );
 
-WITH ship_states AS(
+
+WITH ship_last_states AS(
 SELECT 
-	shippingid, 
-	state,
-	state_datetime,
-	status,
-	ROW_NUMBER() over(PARTITION BY shippingid ORDER BY state_datetime desc) AS state_order_desc
+	s.shippingid, 
+	s.state,
+	s.state_datetime,
+	s.status,
+	ROW_NUMBER() over(PARTITION BY s.shippingid ORDER BY s.state_datetime desc) AS state_order_desc
 FROM public.shipping s
-ORDER BY shippingid)
-INSERT INTO public.shipping_status(shippingid, state, status)
+ORDER BY s.shippingid),
+
+ship_booked_state_datetime AS (
 SELECT 
-	shippingid, 
+	DISTINCT
+	s.shippingid,
+	s.state_datetime 
+FROM public.shipping s
+WHERE s.state = 'booked'),
+
+ship_recieved_state_datetime AS (
+SELECT 
+	DISTINCT 
+	s.shippingid,
+	s.state_datetime 
+FROM public.shipping s
+WHERE s.state = 'recieved')
+
+INSERT INTO public.shipping_status
+SELECT 
+	sls.shippingid, 
 	state, 
-	status
-FROM ship_states
-WHERE state_order_desc = 1;
-
-
-UPDATE public.shipping_status AS ss
-SET shipping_start_fact_datetime = s.state_datetime
-FROM public.shipping s
-WHERE s.shippingid = ss.shippingid AND s.state = 'booked';
-
-
-UPDATE public.shipping_status AS ss
-SET shipping_end_fact_datetime = s.state_datetime
-FROM public.shipping s
-WHERE s.shippingid = ss.shippingid AND s.state = 'recieved';
+	status,
+	sbsd.state_datetime,
+	srsd.state_datetime
+FROM ship_last_states sls
+LEFT JOIN ship_booked_state_datetime sbsd 
+	ON sbsd.shippingid = ss.shippingid
+LEFT JOIN ship_recieved_state_datetime srsd 
+	ON srsd.shippingid = ss.shippingid
+WHERE state_order_desc = 1
+ORDER BY sls.shippingid;
 
 
 DROP VIEW IF EXISTS public.shipping_datamart;
@@ -171,13 +165,15 @@ SELECT
 	payment_amount * (base_rate + agreement_rate + shipping_transfer_rate) AS vat,
 	payment_amount * agreement_commission AS profit
 FROM public.shipping_info si 
-JOIN shipping_transfer st
+LEFT JOIN shipping_transfer st
 	ON st.id = si.transfer_type_id  
-JOIN shipping_status ss 
+LEFT JOIN shipping_status ss 
 	ON ss.shippingid = si.shippingid 
-JOIN shipping_agreement sa 
+LEFT JOIN shipping_agreement sa 
 	ON sa.agreementid = si.agreementid 
-JOIN shipping_country_rates scr 
+LEFT JOIN shipping_country_rates scr 
 	ON scr.id = si.shipping_country_id 
 ORDER BY si.shippingid;
+
+-- я почему-то подумала, что JOIN == LEFT JOIN, но на самом деле JOIN == INNER JOIN 
 
